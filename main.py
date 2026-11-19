@@ -6,6 +6,7 @@ import cloudinary
 import cloudinary.uploader
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pwdlib import PasswordHash
 import jwt
@@ -14,11 +15,18 @@ import jwt
 cloudinary.config(
     cloud_name="ywq1nmza",
     api_key="184542494378983",
-    api_secret="AVtz_MXl8sThEkbO7qV1wo4OvVc", 
+    api_secret="AVtz_MXl8sThEkbO7qV1wo4OvVc",
 )
 
 #------------------connecting-with-db----------------------
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["null", "http://localhost:5500", "http://127.0.0.1:5500", "https://sokar-w-laban.com", "https://www.sokar-w-laban.com", "https://sokar-w-laban.pages.dev", "https://sokar-w-laban.moprogramming11.workers.dev"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 conn = sqlite3.connect("database.db", check_same_thread=False)
 
 #------------------creating-tables----------------------
@@ -58,14 +66,14 @@ class Users(BaseModel):
     username: str
     email: str
     phone: str
-    password: str = Field(..., min_length=6) 
-    
+    password: str = Field(..., min_length=6)
+
 class Products(BaseModel):
     name: str
     description: str
     price: float
     image_url: str = None
-    
+
 class Orders(BaseModel):
     user_id: int
     username: str
@@ -73,70 +81,41 @@ class Orders(BaseModel):
     product_id: int
     quantity: int
     total_price: float
-    
 
-#------------------creat-tokens----------------------- 
 
+#------------------creat-tokens-----------------------
 SECRET_KEY = "sokar.w.laban_secret_key"
 ALGORITHM = "HS256"
 
 def create_access_token(data: dict):
     to_encode = data.copy()
-    token = jwt.encode(
-        to_encode,
-        SECRET_KEY,
-        algorithm=ALGORITHM
-    )
+    token = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return token
 
-    return token      
-  
-  
+
 #----------------------img-url-maker----------------------
-
 @app.post("/upload-image")
 def upload_image(image: UploadFile = File(...)):
-
     if not image.content_type or not image.content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=400,
-            detail="Please upload an image file."
-        )
-
+        raise HTTPException(status_code=400, detail="Please upload an image file.")
     try:
-        result = cloudinary.uploader.upload(
-            image.file,
-            folder="b-laban"
-        )
- 
-        return {
-            "message": "Image uploaded successfully",
-            "img_url": result["secure_url"]
-        }
-
+        result = cloudinary.uploader.upload(image.file, folder="b-laban")
+        return {"message": "Image uploaded successfully", "img_url": result["secure_url"]}
     except Exception as error:
         print("Cloudinary upload error:", repr(error))
-
-        raise HTTPException(
-            status_code=500,
-            detail=str(error)
-        )
-
+        raise HTTPException(status_code=500, detail=str(error))
     finally:
         image.file.close()
 
 
 #------------------Authentication-----------------------
-#write a function to hash the password
 def hash_password(password: str) -> str:
-    ph = PasswordHash()
-    hashed_password = ph.hash(password)
-    return hashed_password
+    ph = PasswordHash.recommended()
+    return ph.hash(password)
 
 @app.post("/register")
 def register_user(user: Users):
-    # Hash the password before storing it in the database
     hashed_password = hash_password(user.password)
-
     try:
         conn.execute(
             "INSERT INTO users (username, email, phone, password) VALUES (?, ?, ?, ?)",
@@ -144,46 +123,35 @@ def register_user(user: Users):
         )
         conn.commit()
         return {"message": "User registered successfully"}
-    except sqlite3.IntegrityError as e:
+    except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="Username, email, or phone already exists")
-    
+
 @app.post("/login")
 def login_user(username: str, password: str):
-    cursor = conn.execute(
-        "SELECT id, password FROM users WHERE username = ?",
-        (username,)
-    )
+    cursor = conn.execute("SELECT id, password FROM users WHERE username = ?", (username,))
     user = cursor.fetchone()
-
     if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
-
     user_id, hashed_password = user
-
-    ph = PasswordHash()
+    ph = PasswordHash.recommended()
     if not ph.verify(password, hashed_password):
         raise HTTPException(status_code=401, detail="Invalid username or password")
-
-    # Create a JWT token for the authenticated user
     access_token = create_access_token({"user_id": user_id, "username": username})
-
-    return {"access_token": access_token, "token_type": "bearer"}    
+    return {"access_token": access_token, "token_type": "bearer"}
 
 #------------------authroization-----------------------
 def requirs_admin(token: str):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("username")
-        if username != "admin":
+        if payload.get("username") != "admin":
             raise HTTPException(status_code=403, detail="Admin privileges required")
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token has expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
-    
-    
-#------------------products-end-points----------------------    
-#------------------add-product-----------------------
+
+
+#------------------products-end-points----------------------
 @app.post("/products")
 def add_product(product: Products, token: str):
     requirs_admin(token)
@@ -194,35 +162,27 @@ def add_product(product: Products, token: str):
     conn.commit()
     return {"message": "Product added successfully"}
 
-#------------------get-all-products-----------------------
 @app.get("/products")
 def get_all_products():
     cursor = conn.execute("SELECT * FROM products")
-    products = cursor.fetchall()
-    return {"products": products}
+    return {"products": cursor.fetchall()}
 
-#------------------delete-product-----------------------
 @app.delete("/products/{product_id}")
 def delete_product(product_id: int, token: str):
     requirs_admin(token)
     cursor = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,))
-    product = cursor.fetchone()
-    if not product:
+    if not cursor.fetchone():
         raise HTTPException(status_code=404, detail="Product not found")
-
     conn.execute("DELETE FROM products WHERE id = ?", (product_id,))
     conn.commit()
     return {"message": "Product deleted successfully"}
 
-#------------------edit-product-----------------------
 @app.put("/products/{product_id}")
 def edit_product(product_id: int, product: Products, token: str):
     requirs_admin(token)
     cursor = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,))
-    existing_product = cursor.fetchone()
-    if not existing_product:
+    if not cursor.fetchone():
         raise HTTPException(status_code=404, detail="Product not found")
-
     conn.execute(
         "UPDATE products SET name = ?, description = ?, price = ?, image_url = ? WHERE id = ?",
         (product.name, product.description, product.price, product.image_url, product_id)
@@ -231,10 +191,8 @@ def edit_product(product_id: int, product: Products, token: str):
     return {"message": "Product updated successfully"}
 
 #------------------orders-end-points----------------------
-#------------------add-order-----------------------
 @app.post("/orders")
 def add_order(order: Orders, token: str):
-    # Verify the token and get the user ID from it
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = payload.get("user_id")
@@ -243,11 +201,8 @@ def add_order(order: Orders, token: str):
         raise HTTPException(status_code=401, detail="Token has expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
-
-    # Check if the user ID in the token matches the user ID in the order
     if user_id != order.user_id or username != order.username:
         raise HTTPException(status_code=403, detail="You are not authorized to place this order")
-
     conn.execute(
         "INSERT INTO orders (user_id, username, user_address, product_id, quantity, total_price) VALUES (?, ?, ?, ?, ?, ?)",
         (order.user_id, order.username, order.user_address, order.product_id, order.quantity, order.total_price)
@@ -255,30 +210,18 @@ def add_order(order: Orders, token: str):
     conn.commit()
     return {"message": "Order placed successfully"}
 
-#------------------get-all-orders-----------------------
 @app.get("/orders")
 def get_all_orders(token: str):
     requirs_admin(token)
     cursor = conn.execute("SELECT * FROM orders")
-    orders = cursor.fetchall()
-    return {"orders": orders}
+    return {"orders": cursor.fetchall()}
 
-#---------------------edit-order-status----------------------
 @app.put("/orders/{order_id}")
 def edit_order_status(order_id: int, status: str, token: str):
     requirs_admin(token)
-
-    cursor = conn.execute(
-        "SELECT id FROM orders WHERE id = ?",
-        (order_id,)
-    )
+    cursor = conn.execute("SELECT id FROM orders WHERE id = ?", (order_id,))
     if not cursor.fetchone():
         raise HTTPException(status_code=404, detail="Order not found")
-
-    conn.execute(
-        "UPDATE orders SET order_status = ? WHERE id = ?",
-        (status, order_id)
-    )
+    conn.execute("UPDATE orders SET order_status = ? WHERE id = ?", (status, order_id))
     conn.commit()
-
     return {"message": "Order status updated successfully"}
